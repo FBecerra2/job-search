@@ -1,26 +1,27 @@
-# Servidor local (solo localhost) para registro.html: marcar ofertas como aplicadas, descartarlas (o recuperarlas) y guardar notas en registro.md.
-# Lo arranca generar-registro.ps1 -Open. NO crea versiones en el historial: solo la skill buscar-empleo lo hace.
-# Parar: detener-servidor.ps1. NOTA: este archivo debe ser solo ASCII.
+# Local server (localhost only) for job-log.html: mark offers as applied, discard them (or restore them) and save notes in data\job-log.md.
+# Started by build-log.ps1 -Open. It does NOT create history versions: only the job-search skill does.
+# Stop it with scripts\stop-server.ps1. NOTE: this file must be plain ASCII.
 param([int]$Port = 8765)
 $ErrorActionPreference = 'Stop'
-$root = Split-Path -Parent $MyInvocation.MyCommand.Path
-$mdPath = Join-Path $root 'registro.md'
-$htmlPath = Join-Path $root 'registro.html'
-$genPath = Join-Path $root 'generar-registro.ps1'
+$root = Split-Path -Parent (Split-Path -Parent $MyInvocation.MyCommand.Path)
+$dataDir = Join-Path $root 'data'
+$mdPath = Join-Path $dataDir 'job-log.md'
+$htmlPath = Join-Path $dataDir 'job-log.html'
+$genPath = Join-Path $PSScriptRoot 'build-log.ps1'
 $utf8 = New-Object System.Text.UTF8Encoding($false)
 $token = [guid]::NewGuid().ToString('N')
 $memo = [char]::ConvertFromUtf32(0x1F4DD)
 
 function Get-Cells([string]$line) { return @($line.Trim().Trim('|').Split('|') | ForEach-Object { $_.Trim() }) }
 function Get-Kind([string]$t) {
-  if ($t -match 'Notas') { return 'notas' }
-  if ($t -match 'Para aplicar') { return 'aplicar' }
-  if ($t -match 'Con dudas') { return 'dudas' }
-  if ($t -match 'Sin verificar') { return 'verificar' }
-  if ($t -match 'Aplicadas') { return 'aplicadas' }
-  if ($t -match 'Respuesta') { return 'respuestas' }
-  if ($t -match 'Descartadas') { return 'descartadas' }
-  return 'otro'
+  if ($t -match 'notes') { return 'notes' }
+  if ($t -match 'To apply') { return 'apply' }
+  if ($t -match 'Unsure') { return 'unsure' }
+  if ($t -match 'Unverified') { return 'unverified' }
+  if ($t -match 'Applied') { return 'applied' }
+  if ($t -match 'Repl') { return 'replies' }
+  if ($t -match 'Discarded') { return 'discarded' }
+  return 'other'
 }
 function Load-Lines {
   $al = New-Object System.Collections.ArrayList
@@ -28,7 +29,7 @@ function Load-Lines {
   return ,$al
 }
 
-# Secciones de tablas: Title, Kind, HdrIdx, SepIdx, Rows (indices de filas de datos), Headers
+# Table sections: Title, Kind, HdrIdx, SepIdx, Rows (indexes of data rows), Headers
 function Get-Sections($lines) {
   $secs = New-Object System.Collections.ArrayList
   $cur = $null
@@ -41,7 +42,7 @@ function Get-Sections($lines) {
     }
     if ($l.StartsWith('|')) {
       if ($null -eq $cur) {
-        $cur = @{ Title = ''; Kind = 'resumen'; HdrIdx = -1; SepIdx = -1; Rows = (New-Object System.Collections.ArrayList); Headers = @() }
+        $cur = @{ Title = ''; Kind = 'summary'; HdrIdx = -1; SepIdx = -1; Rows = (New-Object System.Collections.ArrayList); Headers = @() }
         [void]$secs.Add($cur)
       }
       if ($cur.HdrIdx -lt 0) { $cur.HdrIdx = $i; $cur.Headers = Get-Cells $l }
@@ -57,7 +58,7 @@ function Remove-Placeholders($lines, [string]$kind) {
     if ($s.Kind -eq $kind) {
       for ($j = $s.Rows.Count - 1; $j -ge 0; $j--) {
         $idx = $s.Rows[$j]
-        if ((Get-Cells $lines[$idx])[0] -like '_ninguna*') { $lines.RemoveAt($idx) }
+        if ((Get-Cells $lines[$idx])[0] -like '_none*') { $lines.RemoveAt($idx) }
       }
     }
   }
@@ -73,7 +74,7 @@ function Add-Row($lines, [string]$kind, [string]$newLine) {
       return
     }
   }
-  throw ('No encuentro la seccion ' + $kind)
+  throw ('Section not found: ' + $kind)
 }
 function Ensure-Placeholder($lines, [string]$kind, [string]$text) {
   $secs = Get-Sections $lines
@@ -90,15 +91,15 @@ function Update-Counts($lines) {
   $counts = @{}
   foreach ($s in $secs) {
     $real = 0
-    foreach ($ri in $s.Rows) { if ((Get-Cells $lines[$ri])[0] -notlike '_ninguna*') { $real++ } }
+    foreach ($ri in $s.Rows) { if ((Get-Cells $lines[$ri])[0] -notlike '_none*') { $real++ } }
     $counts[$s.Kind] = $real
   }
   foreach ($s in $secs) {
-    if ($s.Kind -eq 'resumen') {
+    if ($s.Kind -eq 'summary') {
       foreach ($ri in $s.Rows) {
         $c = Get-Cells $lines[$ri]
         $k = Get-Kind $c[0]
-        if (@('aplicar', 'dudas', 'verificar', 'aplicadas', 'respuestas') -contains $k) { $lines[$ri] = '| ' + $c[0] + ' | ' + $counts[$k] + ' |' }
+        if (@('apply', 'unsure', 'unverified', 'applied', 'replies') -contains $k) { $lines[$ri] = '| ' + $c[0] + ' | ' + $counts[$k] + ' |' }
       }
     }
   }
@@ -106,8 +107,8 @@ function Update-Counts($lines) {
 function Update-Stamp($lines, [string]$what) {
   $stamp = Get-Date -Format 'yyyy-MM-dd HH:mm'
   for ($i = 0; $i -lt $lines.Count; $i++) {
-    if ($lines[$i] -match 'actualizaci.n:') {
-      $lines[$i] = ([string][char]218 + 'ltima actualizaci' + [char]243 + 'n: ' + $stamp + ' (' + $what + ')')
+    if ($lines[$i] -match 'Last updated:') {
+      $lines[$i] = ('Last updated: ' + $stamp + ' (' + $what + ')')
       return
     }
   }
@@ -117,152 +118,157 @@ function Save-And-Regen($lines) {
   & $genPath -Refresh | Out-Null
 }
 
-function Op-Aplicar([string]$id) {
+function Op-Apply([string]$id) {
   $lines = Load-Lines
   $secs = Get-Sections $lines
   $found = $null
   foreach ($s in $secs) {
-    if (@('aplicar', 'dudas', 'verificar') -contains $s.Kind) {
+    if (@('apply', 'unsure', 'unverified') -contains $s.Kind) {
       foreach ($ri in $s.Rows) {
         $c = Get-Cells $lines[$ri]
         if ($c[0] -eq $id) { $found = @{ Sec = $s; Idx = $ri; Cells = $c } }
       }
     }
   }
-  if ($null -eq $found) { return @{ ok = $false; error = 'Esa oferta ya no esta en Para aplicar, Con dudas ni Sin verificar (quiza ya esta aplicada).' } }
+  if ($null -eq $found) { return @{ ok = $false; error = 'That offer is no longer in To apply, Unsure or Unverified (maybe it is already applied).' } }
   $hdr = $found.Sec.Headers
-  $ip = [array]::IndexOf($hdr, 'Puesto')
-  $ie = [array]::IndexOf($hdr, 'Empresa')
-  $puesto = ''; if ($ip -ge 0) { $puesto = $found.Cells[$ip] }
+  $ip = [array]::IndexOf($hdr, 'Position')
+  $ie = [array]::IndexOf($hdr, 'Company')
+  $pos = ''; if ($ip -ge 0) { $pos = $found.Cells[$ip] }
   $emp = ''; if ($ie -ge 0) { $emp = $found.Cells[$ie] }
   $kind = $found.Sec.Kind
-  $labels = @{ aplicar = 'Para aplicar'; dudas = 'Con dudas'; verificar = 'Sin verificar' }
+  $labels = @{ apply = 'To apply'; unsure = 'Unsure'; unverified = 'Unverified' }
   $b64 = [Convert]::ToBase64String($utf8.GetBytes($lines[$found.Idx]))
   $lines.RemoveAt($found.Idx)
-  Ensure-Placeholder $lines $kind '_ninguna ahora_'
+  Ensure-Placeholder $lines $kind '_none right now_'
   $when = Get-Date -Format 'yyyy-MM-dd HH:mm'
-  $newRow = '| ' + $id + ' | ' + $puesto + ' | ' + $emp + ' | ' + $when + ' | (manual, por la usuaria) | - | Origen: ' + $labels[$kind] + ' <!--orig:' + $kind + ':' + $b64 + '--> |'
-  Add-Row $lines 'aplicadas' $newRow
+  $newRow = '| ' + $id + ' | ' + $pos + ' | ' + $emp + ' | ' + $when + ' | (manual, by the user) | - | Origin: ' + $labels[$kind] + ' <!--orig:' + $kind + ':' + $b64 + '--> |'
+  Add-Row $lines 'applied' $newRow
   Update-Counts $lines
-  Update-Stamp $lines ('marcada como aplicada desde la web: #' + $id)
+  Update-Stamp $lines ('marked as applied from the web page: #' + $id)
   Save-And-Regen $lines
   return @{ ok = $true }
 }
-function Op-Desaplicar([string]$id) {
+function Op-Unapply([string]$id) {
   $lines = Load-Lines
   $secs = Get-Sections $lines
   $found = -1
   foreach ($s in $secs) {
-    if ($s.Kind -eq 'aplicadas') {
+    if ($s.Kind -eq 'applied') {
       foreach ($ri in $s.Rows) { if ((Get-Cells $lines[$ri])[0] -eq $id) { $found = $ri } }
     }
   }
-  if ($found -lt 0) { return @{ ok = $false; error = 'No encuentro esa oferta en Aplicadas.' } }
+  if ($found -lt 0) { return @{ ok = $false; error = 'That offer was not found in Applied.' } }
   $m = [regex]::Match($lines[$found], '<!--orig:(\w+):([A-Za-z0-9+/=]+)-->')
-  if (-not $m.Success) { return @{ ok = $false; error = 'No puedo deshacerla: no guarda su fila original (se aplico con la skill). Muevela a mano en registro.md.' } }
+  if (-not $m.Success) { return @{ ok = $false; error = 'Cannot undo it: the original row was not saved (it was applied by the skill). Move it by hand in job-log.md.' } }
   $origKind = $m.Groups[1].Value
   $origLine = $utf8.GetString([Convert]::FromBase64String($m.Groups[2].Value))
   $lines.RemoveAt($found)
-  Ensure-Placeholder $lines 'aplicadas' ('_ninguna todav' + [char]237 + 'a_')
+  Ensure-Placeholder $lines 'applied' '_none yet_'
   Add-Row $lines $origKind $origLine
   Update-Counts $lines
-  Update-Stamp $lines ('quitada la marca de aplicada desde la web: #' + $id)
+  Update-Stamp $lines ('applied mark removed from the web page: #' + $id)
   Save-And-Regen $lines
   return @{ ok = $true }
 }
 function Adjust-Discards($lines, [int]$delta) {
   for ($i = 0; $i -lt $lines.Count; $i++) {
-    if ($lines[$i].StartsWith('|') -and $lines[$i] -match 'Descartadas \| (\d+) filas \(agrupan unas (\d+) ofertas\)') {
+    if ($lines[$i].StartsWith('|') -and $lines[$i] -match 'Discarded \| (\d+) rows \(about (\d+) offers\)') {
       $f = [int]$Matches[1] + $delta
       $o = [int]$Matches[2] + $delta
       if ($f -lt 0) { $f = 0 }
       if ($o -lt 0) { $o = 0 }
-      $lines[$i] = [regex]::Replace($lines[$i], '\d+ filas \(agrupan unas \d+ ofertas\)', ([string]$f + ' filas (agrupan unas ' + [string]$o + ' ofertas)'))
+      $lines[$i] = [regex]::Replace($lines[$i], '\d+ rows \(about \d+ offers\)', ([string]$f + ' rows (about ' + [string]$o + ' offers)'))
       return
     }
   }
 }
-function Op-Descartar([string]$id, [string]$reason) {
+function Op-Discard([string]$id, [string]$reason) {
   $lines = Load-Lines
   $secs = Get-Sections $lines
   $found = $null
   foreach ($s in $secs) {
-    if (@('aplicar', 'dudas', 'verificar') -contains $s.Kind) {
+    if (@('apply', 'unsure', 'unverified') -contains $s.Kind) {
       foreach ($ri in $s.Rows) {
         $c = Get-Cells $lines[$ri]
         if ($c[0] -eq $id) { $found = @{ Sec = $s; Idx = $ri; Cells = $c } }
       }
     }
   }
-  if ($null -eq $found) { return @{ ok = $false; error = 'Esa oferta ya no esta en Para aplicar, Con dudas ni Sin verificar.' } }
+  if ($null -eq $found) { return @{ ok = $false; error = 'That offer is no longer in To apply, Unsure or Unverified.' } }
   $hdr = $found.Sec.Headers
-  $ip = [array]::IndexOf($hdr, 'Puesto')
-  $ie = [array]::IndexOf($hdr, 'Empresa')
-  $il = [array]::IndexOf($hdr, 'Lugar')
-  $puesto = ''; if ($ip -ge 0) { $puesto = $found.Cells[$ip] }
+  $ip = [array]::IndexOf($hdr, 'Position')
+  $ie = [array]::IndexOf($hdr, 'Company')
+  $il = [array]::IndexOf($hdr, 'Location')
+  $pos = ''; if ($ip -ge 0) { $pos = $found.Cells[$ip] }
   $emp = ''; if ($ie -ge 0) { $emp = $found.Cells[$ie] }
-  $lugar = ''; if ($il -ge 0 -and $il -lt $found.Cells.Count) { $lugar = $found.Cells[$il] }
+  $loc = ''; if ($il -ge 0 -and $il -lt $found.Cells.Count) { $loc = $found.Cells[$il] }
   $kind = $found.Sec.Kind
-  $labels = @{ aplicar = 'Para aplicar'; dudas = 'Con dudas'; verificar = 'Sin verificar' }
+  $labels = @{ apply = 'To apply'; unsure = 'Unsure'; unverified = 'Unverified' }
   $why = ([string]$reason).Replace('|', '/').Replace("`r", ' ').Replace("`n", ' ').Trim()
   if ($why.Length -gt 300) { $why = $why.Substring(0, 300) }
-  $mot = 'Descartada por la usuaria'
+  $mot = 'Discarded by the user'
   if ($why -ne '') { $mot = $mot + ': ' + $why }
   $b64 = [Convert]::ToBase64String($utf8.GetBytes($lines[$found.Idx]))
   $lines.RemoveAt($found.Idx)
-  Ensure-Placeholder $lines $kind '_ninguna ahora_'
-  $newRow = '| ' + $id + ' | ' + $puesto + ' | ' + $emp + ' | ' + $lugar + ' | ' + $mot + '. Origen: ' + $labels[$kind] + ' <!--orig:' + $kind + ':' + $b64 + '--> |'
-  Add-Row $lines 'descartadas' $newRow
+  Ensure-Placeholder $lines $kind '_none right now_'
+  $newRow = '| ' + $id + ' | ' + $pos + ' | ' + $emp + ' | ' + $loc + ' | ' + $mot + '. Origin: ' + $labels[$kind] + ' <!--orig:' + $kind + ':' + $b64 + '--> |'
+  Add-Row $lines 'discarded' $newRow
   Update-Counts $lines
   Adjust-Discards $lines 1
-  Update-Stamp $lines ('descartada desde la web: #' + $id)
+  Update-Stamp $lines ('discarded from the web page: #' + $id)
   Save-And-Regen $lines
   return @{ ok = $true }
 }
-function Op-Restaurar([string]$id) {
+function Op-Restore([string]$id) {
   $lines = Load-Lines
   $secs = Get-Sections $lines
   $found = -1
   foreach ($s in $secs) {
-    if ($s.Kind -eq 'descartadas') {
+    if ($s.Kind -eq 'discarded') {
       foreach ($ri in $s.Rows) { if ((Get-Cells $lines[$ri])[0] -eq $id) { $found = $ri } }
     }
   }
-  if ($found -lt 0) { return @{ ok = $false; error = 'No encuentro esa oferta en Descartadas.' } }
+  if ($found -lt 0) { return @{ ok = $false; error = 'That offer was not found in Discarded.' } }
   $m = [regex]::Match($lines[$found], '<!--orig:(\w+):([A-Za-z0-9+/=]+)-->')
-  if (-not $m.Success) { return @{ ok = $false; error = 'No puedo recuperarla desde la web: no guarda su fila original. Pidele a la skill que la recupere (vuelve a poner la oferta) o muevela a mano en registro.md.' } }
+  if (-not $m.Success) { return @{ ok = $false; error = 'Cannot restore it from the web page: the original row was not saved. Ask the skill to restore it ("put offer N back") or move it by hand in job-log.md.' } }
   $origKind = $m.Groups[1].Value
   $origLine = $utf8.GetString([Convert]::FromBase64String($m.Groups[2].Value))
   $lines.RemoveAt($found)
   Add-Row $lines $origKind $origLine
   Update-Counts $lines
   Adjust-Discards $lines -1
-  Update-Stamp $lines ('recuperada de descartadas desde la web: #' + $id)
+  Update-Stamp $lines ('restored from Discarded on the web page: #' + $id)
   Save-And-Regen $lines
   return @{ ok = $true }
 }
-function Op-Nota([string]$id, [string]$name, [string]$text) {
+function Op-Note([string]$id, [string]$name, [string]$text) {
   $lines = Load-Lines
   $clean = $text.Replace("`r`n", '<br>').Replace("`n", '<br>').Replace("`r", '<br>').Replace('|', '/').Trim()
   $nm = $name.Replace('|', '/').Trim()
   $when = Get-Date -Format 'yyyy-MM-dd HH:mm'
   $secs = Get-Sections $lines
   $notes = $null
-  foreach ($s in $secs) { if ($s.Kind -eq 'notas') { $notes = $s } }
+  foreach ($s in $secs) { if ($s.Kind -eq 'notes') { $notes = $s } }
   if ($null -eq $notes) {
     if ($clean -eq '') { return @{ ok = $true } }
     [void]$lines.Add('')
-    [void]$lines.Add('## ' + $memo + ' Notas de la usuaria')
+    [void]$lines.Add('## ' + $memo + ' User notes')
     [void]$lines.Add('')
-    [void]$lines.Add('| # | Oferta | Fecha y hora | Nota |')
-    [void]$lines.Add('|---|--------|--------------|------|')
+    [void]$lines.Add('| # | Offer | Date and time | Note |')
+    [void]$lines.Add('|---|-------|---------------|------|')
     $secs = Get-Sections $lines
-    foreach ($s in $secs) { if ($s.Kind -eq 'notas') { $notes = $s } }
+    foreach ($s in $secs) { if ($s.Kind -eq 'notes') { $notes = $s } }
+  }
+  if ($clean -ne '') {
+    Remove-Placeholders $lines 'notes'
+    $secs = Get-Sections $lines
+    foreach ($s in $secs) { if ($s.Kind -eq 'notes') { $notes = $s } }
   }
   $existing = -1
   foreach ($ri in $notes.Rows) { if ((Get-Cells $lines[$ri])[0] -eq $id) { $existing = $ri } }
   if ($clean -eq '') {
-    if ($existing -ge 0) { $lines.RemoveAt($existing) }
+    if ($existing -ge 0) { $lines.RemoveAt($existing); Ensure-Placeholder $lines 'notes' '_none yet_' }
   } else {
     $row = '| ' + $id + ' | ' + $nm + ' | ' + $when + ' | ' + $clean + ' |'
     if ($existing -ge 0) { $lines[$existing] = $row }
@@ -272,7 +278,7 @@ function Op-Nota([string]$id, [string]$name, [string]$text) {
       $lines.Insert($at, $row)
     }
   }
-  Update-Stamp $lines ('nota guardada desde la web: #' + $id)
+  Update-Stamp $lines ('note saved from the web page: #' + $id)
   Save-And-Regen $lines
   return @{ ok = $true }
 }
@@ -297,16 +303,16 @@ while ($listener.IsListening) {
     if ($req.HttpMethod -eq 'GET') {
       if ($path -eq '/ping') { Send $ctx 200 'text/plain; charset=utf-8' 'ok'; continue }
       if ($path -eq '/api/mtime') { Send $ctx 200 'text/plain; charset=utf-8' ([string](Get-Item -LiteralPath $htmlPath).LastWriteTimeUtc.Ticks); continue }
-      if ($path -eq '/' -or $path -eq '/registro.html') {
+      if ($path -eq '/' -or $path -eq '/job-log.html') {
         $h = [System.IO.File]::ReadAllText($htmlPath, $utf8)
         Send $ctx 200 'text/html; charset=utf-8' $h.Replace('__TOKEN__', $token)
         continue
       }
-      if ($path -match '^/historial/([\w\-\.]+\.md)$') {
-        $f = Join-Path (Join-Path $root 'historial') $Matches[1]
+      if ($path -match '^/history/([\w\-\.]+\.md)$') {
+        $f = Join-Path (Join-Path $dataDir 'history') $Matches[1]
         if (Test-Path -LiteralPath $f) { Send $ctx 200 'text/plain; charset=utf-8' ([System.IO.File]::ReadAllText($f, $utf8)); continue }
       }
-      Send $ctx 404 'text/plain; charset=utf-8' 'No encontrado'
+      Send $ctx 404 'text/plain; charset=utf-8' 'Not found'
       continue
     }
     if ($req.HttpMethod -eq 'POST' -and $path -like '/api/*') {
@@ -315,30 +321,30 @@ while ($listener.IsListening) {
       $origin = $req.Headers['Origin']
       if ($origin -and $origin -ne ('http://localhost:' + $Port)) { $ok = $false }
       if (-not $req.ContentType -or $req.ContentType -notlike 'application/json*') { $ok = $false }
-      if (-not $ok) { Send $ctx 403 'application/json; charset=utf-8' '{"ok":false,"error":"No autorizado"}'; continue }
+      if (-not $ok) { Send $ctx 403 'application/json; charset=utf-8' '{"ok":false,"error":"Not authorized"}'; continue }
       $sr = New-Object System.IO.StreamReader($req.InputStream, $utf8)
       $raw = $sr.ReadToEnd()
       $sr.Close()
       $data = $raw | ConvertFrom-Json
       $id = [string]$data.id
-      if ($id -notmatch '^\d{1,4}$') { Send $ctx 200 'application/json; charset=utf-8' '{"ok":false,"error":"Identificador no valido"}'; continue }
+      if ($id -notmatch '^\d{1,4}$') { Send $ctx 200 'application/json; charset=utf-8' '{"ok":false,"error":"Invalid identifier"}'; continue }
       $res = $null
-      if ($path -eq '/api/aplicar') { $res = Op-Aplicar $id }
-      elseif ($path -eq '/api/desaplicar') { $res = Op-Desaplicar $id }
-      elseif ($path -eq '/api/descartar') { $res = Op-Descartar $id ([string]$data.reason) }
-      elseif ($path -eq '/api/restaurar') { $res = Op-Restaurar $id }
-      elseif ($path -eq '/api/nota') {
+      if ($path -eq '/api/apply') { $res = Op-Apply $id }
+      elseif ($path -eq '/api/unapply') { $res = Op-Unapply $id }
+      elseif ($path -eq '/api/discard') { $res = Op-Discard $id ([string]$data.reason) }
+      elseif ($path -eq '/api/restore') { $res = Op-Restore $id }
+      elseif ($path -eq '/api/note') {
         $txt = [string]$data.text
         if ($txt.Length -gt 4000) { $txt = $txt.Substring(0, 4000) }
-        $res = Op-Nota $id ([string]$data.name) $txt
+        $res = Op-Note $id ([string]$data.name) $txt
       }
-      else { $res = @{ ok = $false; error = 'Ruta desconocida' } }
+      else { $res = @{ ok = $false; error = 'Unknown route' } }
       Send $ctx 200 'application/json; charset=utf-8' ($res | ConvertTo-Json -Compress)
       continue
     }
-    Send $ctx 404 'text/plain; charset=utf-8' 'No encontrado'
+    Send $ctx 404 'text/plain; charset=utf-8' 'Not found'
   } catch {
-    try { [System.IO.File]::AppendAllText((Join-Path $root 'servidor-registro.log'), ((Get-Date -Format 'yyyy-MM-dd HH:mm:ss') + ' ' + $_.Exception.Message + ' | ' + $_.InvocationInfo.PositionMessage + "`r`n"), $utf8) } catch { }
+    try { [System.IO.File]::AppendAllText((Join-Path $dataDir 'server.log'), ((Get-Date -Format 'yyyy-MM-dd HH:mm:ss') + ' ' + $_.Exception.Message + ' | ' + $_.InvocationInfo.PositionMessage + "`r`n"), $utf8) } catch { }
     try { Send $ctx 500 'application/json; charset=utf-8' (@{ ok = $false; error = $_.Exception.Message } | ConvertTo-Json -Compress) } catch { }
   }
 }
